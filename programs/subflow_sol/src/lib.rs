@@ -3,6 +3,8 @@ use anchor_spl::token::{Mint, Token, TokenAccount, Transfer};
 
 declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
+const DAY_IN_SECONDS: u64 = 60 * 60 * 24;
+
 #[program]
 pub mod subflow_sol {
     use super::*;
@@ -13,11 +15,13 @@ pub mod subflow_sol {
         subflow.admin = ctx.accounts.authority.key();
         subflow.active_services = 0;
         subflow.bump = *ctx.bumps.get("subflow").unwrap();
+        // cannot pause for more than 30 days at a time
+        subflow.max_pause_duration_days = 30;
 
         Ok(())
     }
 
-    pub fn initialize_service(ctx: Context<InitializeService>, name: String, uri: String, pause_time: u8) -> Result<()> {
+    pub fn initialize_service(ctx: Context<InitializeService>, name: String, uri: String) -> Result<()> {
         require!(
             name.chars().count <= Service::MAX_NAME_LENGTH,
             SubflowError::MaxServiceNameExceeded
@@ -40,10 +44,47 @@ pub mod subflow_sol {
         service.mint = ctx.accounts.vault.key();
 
         service.paused = false;
-        service.pause_start_time = 0;
-        service.max_pause_duration_days = pause_time;
+        service.active_pause_start_time = 0;
+        service.active_pause_duration = 0;
 
         Ok(())
+    }
+
+    /// When a service is paused the following actions are restricted on it:
+    /// - Withdrawal of funds
+    /// - New subscriptions to the service. Active subscriptions are still valid
+    /// - Addition of new plans to the service.
+    ///
+    pub fn pause_service(ctx: Context<PauseService>, duration: u8) -> Result<()> {
+        let service = &mut ctx.accounts.service;
+        let clock = clock::Clock::get().unwrap();
+        
+        service.paused = true;
+        service.active_pause_start_time = clock.unix_timestamp;
+        service.active_pause_duration = duration;
+    }
+
+    pub fn unpause_service(ctx: Context<UnpauseService>) -> Result<()> {
+        let service = &mut ctx.accounts.service;
+        let clock = clock::Clock::get().unwrap();
+
+        /// Check if service can be unpaused
+        let now_timestamp = clock.unix_timestamp;
+        let duration = service.active_pause_duration;
+        let start_timestamp = service.active_pause_start_time;
+
+        let duration_in_seconds: u64 = duration
+            .checked_mul(DAY_IN_SECONDS).unwrap();
+        
+        require!(
+            now_timestamp > start_timestamp.checked_add(duration_in_seconds).unwrap(),
+            SubflowError::CantUnpauseYet
+        );
+
+        // else unpause
+        service.paused = false;
+        service.active_pause_start_time = 0;
+        service.active_pause_duration = 0;
     }
 
     pub fn add_plan(ctx: Context<AddPlan>, interval: u64, cost: u64) -> Result<()> {
@@ -111,9 +152,35 @@ pub struct InitializeService<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(pause_time: u8)]
+pub struct PauseService<'info> {
+    subflow: Box<Account<'info, Subflow>>,
+    #[account(
+        mut, has_one = authority, has_one = subflow
+        constraint = pause_time <= subflow.max_pause_duration_days @
+        SubflowError::ExceededMaxPauseTime,
+    )]
+    service: Box<Account<'info, Service>>,
+
+    authority: Signer<'info>,
+} 
+
+#[derive(Accounts)]
+pub struct UnpauseService<'info> {
+    subflow: Box<Account<'info, Subflow>>,
+    #[account(mut, has_one = authority, has_one = subflow)]
+    service: Box<Account<'info, service>>,
+    authority: Signer<'info>
+}
+
+
+#[derive(Accounts)]
 #[instruction(interval: u64)]
 pub struct AddPlan<'info> {
-    #[account(mut, has_one = authority)]
+    #[account(
+        mut, has_one = authority,
+        constraint = service.paused == false @ SubflowError::ServicePaused
+    )]
     service: Box<Account<'info, Service>>,
     /// The interval is used as one of the 
     /// seeds for the plan PDA because a service
@@ -142,10 +209,11 @@ pub struct Subflow {
 
     // PDA  bump
     bump: u8,
+    max_pause_duration_days: u8,
 }
 
 impl Subflow {
-    const SIZE: usize = 32 + 8 + 1;
+    const SIZE: usize = 32 + 8 + 1 + 1;
 }
 
 #[account]
@@ -162,8 +230,8 @@ pub struct Service {
 
     /// Options to pause a service
     paused: bool,
-    pause_start_time: i64,
-    max_pause_duration_days: u8,
+    active_pause_start_time: i64,
+    active_pause_duration: u8,
 }
 
 impl Service {
@@ -202,4 +270,7 @@ impl User {
 pub enum SubflowError {
     MaxServiceNameExceeded,
     MaxURILengthExceeded,
+    ExceededMaxPauseTime,
+    ServicePaused,
+    CantUnpauseYet,
 }
