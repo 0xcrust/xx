@@ -21,7 +21,11 @@ pub mod subflow_sol {
         Ok(())
     }
 
-    pub fn initialize_service(ctx: Context<InitializeService>, name: String, uri: String) -> Result<()> {
+    pub fn initialize_service(
+        ctx: Context<InitializeService>,
+        name: String,
+        uri: String,
+    ) -> Result<()> {
         require!(
             name.chars().count <= Service::MAX_NAME_LENGTH,
             SubflowError::MaxServiceNameExceeded
@@ -29,7 +33,7 @@ pub mod subflow_sol {
         require!(
             uri.chars().count <= Service::URI_LENGTH,
             SubflowError::MaxURILengthExceeded
-        )
+        );
         let subflow = &mut ctx.accounts.subflow;
         subflow.active_services = subflow.active_services.checked_add(1).unwrap();
 
@@ -58,7 +62,7 @@ pub mod subflow_sol {
     pub fn pause_service(ctx: Context<PauseService>, duration: u8) -> Result<()> {
         let service = &mut ctx.accounts.service;
         let clock = clock::Clock::get().unwrap();
-        
+
         service.paused = true;
         service.active_pause_start_time = clock.unix_timestamp;
         service.active_pause_duration = duration;
@@ -73,9 +77,8 @@ pub mod subflow_sol {
         let duration = service.active_pause_duration;
         let start_timestamp = service.active_pause_start_time;
 
-        let duration_in_seconds: u64 = duration
-            .checked_mul(DAY_IN_SECONDS).unwrap();
-        
+        let duration_in_seconds: u64 = duration.checked_mul(DAY_IN_SECONDS).unwrap();
+
         require!(
             now_timestamp > start_timestamp.checked_add(duration_in_seconds).unwrap(),
             SubflowError::CantUnpauseYet
@@ -110,29 +113,60 @@ pub mod subflow_sol {
             authority: subscriber.to_account_info(),
         };
 
-        let cpi_ctx = CpiContext::new(
-            ctx.accounts.token_program.to_account_info(),
-            transfer_ix
-        );
+        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), transfer_ix);
 
         anchor_spl::token::transfer(cpi_ctx, transfer_size)?;
 
         let plan_interval = plan.interval;
-        let plan_interval_in_seconds = plan_interval
-            .checked_mul(DAY_IN_SECONDS).unwrap();
+        let plan_interval_in_seconds = plan_interval.checked_mul(DAY_IN_SECONDS).unwrap();
         let now = clock::Clock::get().unwrap().unix_timestamp;
 
         let subscriber_state = &mut ctx.accounts.subscriber_state;
         subscriber_state.plan = plan.key();
-        subscriber_state.subscription_end_date = now.checked_add(plan_interval_in_seconds); 
+        subscriber_state.subscription_end_date = now.checked_add(plan_interval_in_seconds);
         subscriber_state.bump = *ctx.bumps.get("subscriber_state").unwrap();
         subscriber_state.subscriber = ctx.accounts.subscriber.key();
 
         Ok(())
+    }
 
-        todo!("Write a check in this function that handles renewal
-        i.e a user subscribing when they already have an active subscription or
-        after having subscribed at least once before")
+    pub fn renew(ctx: Context<Renew>) -> Result<()> {
+        let plan = &mut ctx.accounts.plan;
+        let transfer_size = plan.cost;
+
+        let transfer_ix = Transfer {
+            from: ctx.accounts.subscriber_token_account.to_account_info(),
+            to: ctx.accounts.vault.to_account_info(),
+            authority: subscriber.to_account_info(),
+        };
+
+        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), transfer_ix);
+
+        anchor_spl::token::transfer(cpi_ctx, transfer_size)?;
+
+        let plan_interval = plan.interval;
+        let plan_interval_in_seconds = plan_interval.checked_mul(DAY_IN_SECONDS).unwrap();
+        let now = clock::Clock::get().unwrap().unix_timestamp;
+        let suscription_end_date = ctx.accounts.subscriber_state.subscription_end_date;
+
+        let subscriber_state = &mut ctx.accounts.subscriber_state;
+        let user_subscription_active: bool = subscription_end_date > now;
+
+        let start_date: i64;
+
+        match user_subscription_active {
+            true => {
+                start_date = subscription_end_date;
+            }
+            false => {
+                start_date = now;
+            }
+        }
+
+        subscriber_state.subscription_end_date =
+            start_date.checked_add(plan_interval_in_seconds).unwrap();
+
+        Ok(())
     }
 
     pub fn check_status(ctx: Context<CheckStatus>, subscriber: Pubkey) -> Result<bool> {
@@ -143,7 +177,7 @@ pub mod subflow_sol {
 
         match user_subscribed {
             true => Ok(true),
-            false => Ok(false)
+            false => Ok(false),
         }
     }
 }
@@ -175,7 +209,7 @@ pub struct InitializeService<'info> {
         payer = authority,
         space = 8 + Service::SIZE,
         seeds = [
-            service_name.as_bytes().as_ref(), subflow.key().as_ref(), 
+            service_name.as_bytes().as_ref(), subflow.key().as_ref(),
             authority.key().as_ref()
         ],
         bump
@@ -194,7 +228,7 @@ pub struct InitializeService<'info> {
     authority: Signer<'info>,
 
     mint: Box<Account<'info, Mint>>,
-    system_program: Program<'info, System>
+    system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -209,14 +243,14 @@ pub struct PauseService<'info> {
     service: Box<Account<'info, Service>>,
 
     authority: Signer<'info>,
-} 
+}
 
 #[derive(Accounts)]
 pub struct UnpauseService<'info> {
     subflow: Box<Account<'info, Subflow>>,
     #[account(mut, has_one = authority, has_one = subflow)]
     service: Box<Account<'info, service>>,
-    authority: Signer<'info>
+    authority: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -227,7 +261,7 @@ pub struct AddPlan<'info> {
         constraint = service.paused == false @ SubflowError::ServicePaused("Can't add new plan")
     )]
     service: Box<Account<'info, Service>>,
-    /// The interval is used as one of the 
+    /// The interval is used as one of the
     /// seeds for the plan PDA because a service
     /// ideally shouldn't have different plans
     /// for the same interval.
@@ -242,9 +276,8 @@ pub struct AddPlan<'info> {
 
     #[account(mut)]
     authority: Signer<'info>,
-    system_program: Program<'info, System>
+    system_program: Program<'info, System>,
 }
-
 
 #[derive(Accounts)]
 pub struct Subscribe<'info> {
@@ -275,7 +308,40 @@ pub struct Subscribe<'info> {
         seeds = ["subscriber".as_bytes.as_ref(), plan.key().as_ref(), subscriber.key().as_ref()],
         bump
     )]
-    subscriber_state: Box<<Account<'info, Subscriber>>,
+    subscriber_state: Box<Account<'info, Subscriber>>,
+
+    system_program: Program<'info, System>,
+    token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct Renew<'info> {
+    #[account(
+        has_one = vault,
+        constraint = service.paused == false @ SubflowError::ServicePaused("Can't subscribe")
+    )]
+    service: Box<Account<'info, Service>>,
+
+    #[account(mut, has_one = service)]
+    plan: Box<Account<'info, Plan>>,
+    #[account(mut)]
+    vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(mut)]
+    subscriber: Signer<'info>,
+
+    #[account(
+        mut,
+        constraint = subscriber_token_account.mint == service.mint @ SubflowError::WrongMint,
+        constraint = subscriber_token_account.owner == subscriber.key()
+    )]
+    subscriber_token_account: Box<Account<'info, TokenAccount>>,
+    #[account(
+        mut,
+        seeds = ["subscriber".as_bytes.as_ref(), plan.key().as_ref(), subscriber.key().as_ref()],
+        bump
+    )]
+    subscriber_state: Box<Account<'info, Subscriber>>,
 
     system_program: Program<'info, System>,
     token_program: Program<'info, Token>,
@@ -291,7 +357,7 @@ pub struct CheckSubscriptionStatus<'info> {
     )]
     subscriber_state: Box<Account<'info, Subscriber>>,
 
-    plan: Box<Account<'info, Plan>
+    plan: Box<Account<'info, Plan>>,
 }
 
 #[account]
@@ -331,8 +397,8 @@ pub struct Service {
 impl Service {
     const MAX_NAME_LENGTH: usize = 16;
     const URI_LENGTH: usize = 50;
-    const SIZE: usize = (3 * 32) + 8 + (4 + Self::MAX_NAME_LENGTH) + (4 + Self::URI_LENGTH)+ 1 + 1
-        + 1 + 64 + 1;
+    const SIZE: usize =
+        (3 * 32) + 8 + (4 + Self::MAX_NAME_LENGTH) + (4 + Self::URI_LENGTH) + 1 + 1 + 1 + 64 + 1;
 }
 
 #[account]
@@ -352,7 +418,7 @@ pub struct Subscriber {
     suscriber: Pubkey,
     plan: Pubkey,
     subscription_end_date: i64,
-    bump: u8
+    bump: u8,
 }
 
 impl User {
@@ -366,6 +432,6 @@ pub enum SubflowError {
     ExceededMaxPauseTime,
     ServicePaused(String),
     CantUnpauseYet,
-    WrongMint
+    WrongMint,
     UserNeverSubscribed,
 }
