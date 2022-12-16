@@ -100,6 +100,45 @@ pub mod subflow_sol {
 
         Ok(())
     }
+
+    pub fn subscribe(ctx: Context<Subscribe>) -> Result<()> {
+        let plan = &mut ctx.accounts.plan;
+
+        let transfer_size = plan.cost;
+
+        let transfer_ix = Transfer {
+            from: ctx.accounts.subscriber_token_account.to_account_info(),
+            to: ctx.accounts.vault.to_account_info(),
+            authority: subscriber.to_account_info(),
+        };
+
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            transfer_ix
+        );
+
+        anchor_spl::token::transfer(cpi_ctx, transfer_size)?;
+
+        plan.active_subscribers = plan.active_subscribers.checked_add(1).unwrap();
+
+        let plan_interval = plan.interval;
+        let plan_interval_in_seconds = plan_interval
+            .checked_mul(DAY_IN_SECONDS).unwrap();
+        let now = clock::Clock::get().unwrap().unix_timestamp;
+
+        let subscriber_state = &mut ctx.accounts.subscriber_state;
+        subscriber_state.plan = plan.key();
+        subscriber_state.subscriber_end_date = now.checked_add(plan_interval_in_seconds); 
+        subscriber_state.bump = *ctx.bumps.get("subscriber_state").unwrap();
+
+        Ok(())
+
+        todo!("Write a check in this function that handles renewal
+        i.e a user subscribing when they already have an active subscription or
+        after having subscribed at least once before")
+    }
+
+    pub
 }
 
 #[derive(Accounts)]
@@ -173,13 +212,12 @@ pub struct UnpauseService<'info> {
     authority: Signer<'info>
 }
 
-
 #[derive(Accounts)]
 #[instruction(interval: u64)]
 pub struct AddPlan<'info> {
     #[account(
         mut, has_one = authority,
-        constraint = service.paused == false @ SubflowError::ServicePaused
+        constraint = service.paused == false @ SubflowError::ServicePaused("Can't add new plan")
     )]
     service: Box<Account<'info, Service>>,
     /// The interval is used as one of the 
@@ -190,7 +228,7 @@ pub struct AddPlan<'info> {
         init,
         payer = authority,
         space = 8 + Plan::SIZE,
-        seeds = [interval.to_le_bytes().as_ref(),service.key().as_ref()],
+        seeds = ["plan".as_bytes.as_ref(), interval.to_le_bytes().as_ref(), service.key().as_ref()],
         bump
     )]
     plan: Box<Account<'info, Plan>>,
@@ -198,6 +236,42 @@ pub struct AddPlan<'info> {
     #[account(mut)]
     authority: Signer<'info>,
     system_program: Program<'info, System>
+}
+
+
+#[derive(Accounts)]
+pub struct Subscribe<'info> {
+    #[account(
+        has_one = vault,
+        constraint = service.paused == false @ SubflowError::ServicePaused("Can't subscribe")
+    )]
+    service: Box<Account<'info, Service>>,
+
+    #[account(mut, has_one = service)]
+    plan: Box<Account<'info, Plan>>,
+
+    #[account(mut)]
+    vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(mut)]
+    subscriber: Signer<'info>,
+    #[account(
+        mut,
+        constraint = subscriber_token_account.mint == service.mint @ SubflowError::WrongMint,
+        constraint = subscriber_token_account.owner == subscriber.key()
+    )]
+    subscriber_token_account: Box<Account<'info, TokenAccount>>,
+    #[account(
+        init,
+        payer = subscriber,
+        space = 8 + User::SIZE,
+        seeds = ["user".as_bytes.as_ref(), plan.key().as_ref(), subscriber.key().as_ref()],
+        bump
+    )]
+    subscriber_state: Box<<Account<'info, Subscriber>>,
+
+    system_program: Program<'info, System>,
+    token_program: Program<'info, Token>,
 }
 
 #[account]
@@ -255,15 +329,14 @@ impl Plan {
 }
 
 #[account]
-pub struct User {
-    id: u64,
+pub struct Subscriber {
     plan: Pubkey,
     subscription_end_date: i64,
     bump: u8
 }
 
 impl User {
-    const SIZE: usize = 8 + 32 + 8 + 1;
+    const SIZE: usize = 32 + 8 + 1;
 }
 
 #[error_code]
@@ -271,6 +344,7 @@ pub enum SubflowError {
     MaxServiceNameExceeded,
     MaxURILengthExceeded,
     ExceededMaxPauseTime,
-    ServicePaused,
+    ServicePaused(String),
     CantUnpauseYet,
+    WrongMint
 }
