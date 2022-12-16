@@ -17,7 +17,7 @@ pub mod subflow_sol {
         Ok(())
     }
 
-    pub fn initialize_service(ctx: Context<InitializeService>, name: String, uri: String) -> Result<()> {
+    pub fn initialize_service(ctx: Context<InitializeService>, name: String, uri: String, pause_time: u8) -> Result<()> {
         require!(
             name.chars().count <= Service::MAX_NAME_LENGTH,
             SubflowError::MaxServiceNameExceeded
@@ -38,6 +38,10 @@ pub mod subflow_sol {
         service.bump = *ctx.bumps.get("service").unwrap();
         service.vault = ctx.accounts.vault.key();
         service.mint = ctx.accounts.vault.key();
+
+        service.paused = false;
+        service.pause_start_time = 0;
+        service.max_pause_duration_days = pause_time;
 
         Ok(())
     }
