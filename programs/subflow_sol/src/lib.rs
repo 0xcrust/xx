@@ -1,4 +1,5 @@
-use anchor_lang::prelude::*;
+use anchor_lang::{prelude::*, solana_program::clock};
+use anchor_spl::token::{Mint, Token, TokenAccount, Transfer};
 
 declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
@@ -35,6 +36,22 @@ pub mod subflow_sol {
         service.authority = ctx.accounts.authority.key();
         service.active_plans = 0;
         service.bump = *ctx.bumps.get("service").unwrap();
+        service.vault = ctx.accounts.vault.key();
+        service.mint = ctx.accounts.vault.key();
+
+        Ok(())
+    }
+
+    pub fn add_plan(ctx: Context<AddPlan>, interval: u64, cost: u64) -> Result<()> {
+        let service = &mut ctx.accounts.service;
+        service.active_plans = service.active_plans.checked_add(1).unwrap();
+
+        let plan = &mut ctx.accounts.plan;
+        plan.cost_per_interval = cost;
+        plan.interval_in_days = interval;
+        plan.bump = *ctx.bumps.get("plan").unwrap();
+        plan.service = ctx.accounts.service.key();
+        plan.active_subscribers = 0;
 
         Ok(())
     }
@@ -61,6 +78,7 @@ pub struct InitializeSubflow<'info> {
 pub struct InitializeService<'info> {
     #[account(mut)]
     subflow: Box<Account<'info, Subflow>>,
+
     #[account(
         init,
         payer = authority,
@@ -72,6 +90,40 @@ pub struct InitializeService<'info> {
         bump
     )]
     service: Box<Account<'info, Service>>,
+    #[account(
+        init,
+        seeds = ["vault".as_bytes().as_ref(), service.key().as_ref()],
+        payer = authority,
+        token::mint = mint,
+        token::authority = authority
+    )]
+    vault: Box<Account<'info, TokenAccount>>,
+
+    #[account(mut)]
+    authority: Signer<'info>,
+
+    mint: Box<Account<'info, Mint>>,
+    system_program: Program<'info, System>
+}
+
+#[derive(Accounts)]
+#[instruction(interval: u64)]
+pub struct AddPlan<'info> {
+    #[account(mut, has_one = authority)]
+    service: Box<Account<'info, Service>>,
+    /// The interval is used as one of the 
+    /// seeds for the plan PDA because a service
+    /// ideally shouldn't have different plans
+    /// for the same interval.
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + Plan::SIZE,
+        seeds = [interval.to_le_bytes().as_ref(),service.key().as_ref()],
+        bump
+    )]
+    plan: Box<Account<'info, Plan>>,
+
     #[account(mut)]
     authority: Signer<'info>,
     system_program: Program<'info, System>
@@ -101,29 +153,33 @@ pub struct Service {
     authority: Pubkey,
     active_plans: u8,
     bump: u8,
+    vault: Pubkey,
+    mint: Pubkey,
 
-    /* Options to pause a service */
-    // paused: bool,
-    // pause_start_time: i64,
-    // max_pause_duration_days: u8,
+    /// Options to pause a service
+    paused: bool,
+    pause_start_time: i64,
+    max_pause_duration_days: u8,
 }
 
 impl Service {
     const MAX_NAME_LENGTH: usize = 16;
     const URI_LENGTH: usize = 50;
-    const SIZE: usize = 32 + 8 + (4 + Self::MAX_NAME_LENGTH) + (4 + Self::URI_LENGTH) + 32 + 1 + 1;
+    const SIZE: usize = (3 * 32) + 8 + (4 + Self::MAX_NAME_LENGTH) + (4 + Self::URI_LENGTH)+ 1 + 1
+        + 1 + 64 + 1;
 }
 
 #[account]
 pub struct Plan {
-    id: u64,
-    cost: u64,
+    cost_per_interval: u64,
     interval_in_days: u64,
     bump: u8,
+    service: Pubkey,
+    active_subscribers: u64,
 }
 
 impl Plan {
-    const SIZE: usize = 8 + 8 + 8 + 1;
+    const SIZE: usize = 8 + 8 + 1 + 32 + 8;
 }
 
 #[account]
