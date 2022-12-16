@@ -96,14 +96,12 @@ pub mod subflow_sol {
         plan.interval_in_days = interval;
         plan.bump = *ctx.bumps.get("plan").unwrap();
         plan.service = ctx.accounts.service.key();
-        plan.active_subscribers = 0;
 
         Ok(())
     }
 
     pub fn subscribe(ctx: Context<Subscribe>) -> Result<()> {
         let plan = &mut ctx.accounts.plan;
-
         let transfer_size = plan.cost;
 
         let transfer_ix = Transfer {
@@ -119,8 +117,6 @@ pub mod subflow_sol {
 
         anchor_spl::token::transfer(cpi_ctx, transfer_size)?;
 
-        plan.active_subscribers = plan.active_subscribers.checked_add(1).unwrap();
-
         let plan_interval = plan.interval;
         let plan_interval_in_seconds = plan_interval
             .checked_mul(DAY_IN_SECONDS).unwrap();
@@ -128,8 +124,9 @@ pub mod subflow_sol {
 
         let subscriber_state = &mut ctx.accounts.subscriber_state;
         subscriber_state.plan = plan.key();
-        subscriber_state.subscriber_end_date = now.checked_add(plan_interval_in_seconds); 
+        subscriber_state.subscription_end_date = now.checked_add(plan_interval_in_seconds); 
         subscriber_state.bump = *ctx.bumps.get("subscriber_state").unwrap();
+        subscriber_state.subscriber = ctx.accounts.subscriber.key();
 
         Ok(())
 
@@ -138,7 +135,17 @@ pub mod subflow_sol {
         after having subscribed at least once before")
     }
 
-    pub
+    pub fn check_status(ctx: Context<CheckStatus>, subscriber: Pubkey) -> Result<bool> {
+        let now = clock::Clock::get().unwrap().unix_timestamp;
+        let end_date = ctx.accounts.subscriber_state.subscription_end_date;
+
+        let user_subscribed: bool = end_date > now;
+
+        match user_subscribed {
+            true => Ok(true),
+            false => Ok(false)
+        }
+    }
 }
 
 #[derive(Accounts)]
@@ -265,13 +272,26 @@ pub struct Subscribe<'info> {
         init,
         payer = subscriber,
         space = 8 + User::SIZE,
-        seeds = ["user".as_bytes.as_ref(), plan.key().as_ref(), subscriber.key().as_ref()],
+        seeds = ["subscriber".as_bytes.as_ref(), plan.key().as_ref(), subscriber.key().as_ref()],
         bump
     )]
     subscriber_state: Box<<Account<'info, Subscriber>>,
 
     system_program: Program<'info, System>,
     token_program: Program<'info, Token>,
+}
+
+/// Read only. Checks if a user is subscribed
+#[derive(Accounts)]
+#[instruction(subscriber: Pubkey)]
+pub struct CheckSubscriptionStatus<'info> {
+    #[account(
+        mut @ SubflowError::UserNeverSubscribed
+        has_one = plan, has_one = subscriber
+    )]
+    subscriber_state: Box<Account<'info, Subscriber>>,
+
+    plan: Box<Account<'info, Plan>
 }
 
 #[account]
@@ -321,22 +341,22 @@ pub struct Plan {
     interval_in_days: u64,
     bump: u8,
     service: Pubkey,
-    active_subscribers: u64,
 }
 
 impl Plan {
-    const SIZE: usize = 8 + 8 + 1 + 32 + 8;
+    const SIZE: usize = 8 + 8 + 1 + 32;
 }
 
 #[account]
 pub struct Subscriber {
+    suscriber: Pubkey,
     plan: Pubkey,
     subscription_end_date: i64,
     bump: u8
 }
 
 impl User {
-    const SIZE: usize = 32 + 8 + 1;
+    const SIZE: usize = 32 + 32 + 8 + 1;
 }
 
 #[error_code]
@@ -347,4 +367,5 @@ pub enum SubflowError {
     ServicePaused(String),
     CantUnpauseYet,
     WrongMint
+    UserNeverSubscribed,
 }
